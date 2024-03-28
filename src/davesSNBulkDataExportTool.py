@@ -47,7 +47,7 @@ class SNDataExport:
         filename = self.getOption("outputName")
         self.log.info("Output file: {0}".format(filename))
         try:
-            self.csvFile = open(file=filename, mode='w')
+            self.csvFile = open(file=filename, mode='w', encoding="UTF-8")
         except Exception as ex:
             self.log.error("Failed to open the output file for writing.")
             raise ex
@@ -71,6 +71,12 @@ class SNDataExport:
 
         self.log.info("Instance URL: {0}".format(self.instanceUrl))
 
+        # Validate display_value
+        displayTest = self.getOption("display_value")
+        if (displayTest):
+            if displayTest not in ("true", "false", "all"):
+                raise ValueError("Display value should be one of true, false, or all")
+
         # Validate authentication
         authType = self.getOption("authType")
         if (authType == self.AUTH_NONE):
@@ -84,19 +90,19 @@ class SNDataExport:
 
         self.log.info("Exporting from table: {0}".format(self.getOption("table")))
         self.log.info("Query: {0}".format(self.getOption("query")))
-        
+
         rowLimit = int(self.getOption("row_limit"))
         if (rowLimit > 0): self.log.info("Row limit: {0}".format(rowLimit))
 
     def run(self):
         self.log.info("Running")
-        
+
         try:
             self.loadAndValidate()
 
             self.openOutputFile()
 
-        
+
             self.pageSizeInt = int(self.getOption("pageSize"))
             self.pageIdx = 0
             self.pageOffset = 0
@@ -106,7 +112,7 @@ class SNDataExport:
             commonParams = {}
             commonParams["sysparm_limit"] = self.getOption("pageSize", self.pageSizeInt)
             commonParams["sysparm_exclude_reference_link"] = "true" # Always exclude reference links
-            commonParams["sysparm_display_value"] = bool(self.getOption("display_value"))
+            commonParams["sysparm_display_value"] = self.getOption("display_value")
             commonParams["sysparm_query"] = self.getOption("query")
             if (self.getOption("fields")): commonParams["sysparm_fields"] = self.getOption("fields")
 
@@ -119,7 +125,7 @@ class SNDataExport:
             if (firstResponseCount == 0):
                 self.log.info("No data returned, nothing to do here")
                 return
-            
+
             self.log.info("Results: {0}".format(firstResponseCount))
 
             # Write the first line
@@ -127,12 +133,13 @@ class SNDataExport:
             self.csvWriter = csv.DictWriter(
                 self.csvFile,
                 dialect='unix',
+                extrasaction='ignore',
                 fieldnames=self.getHeaderNamesFromJson(firstResponseJson["result"][0])
                 )
-            
+
             self.log.debug("Writing headers")
             self.csvWriter.writeheader()
-            
+
 
             # Write the other rows
             self.log.debug("Writing results")
@@ -140,10 +147,25 @@ class SNDataExport:
                 if (self.rowLimit > 0 and self.rowCount > self.rowLimit):
                     self.log.info("Row limit reached: {0}".format(self.rowLimit))
                     break
-                self.csvWriter.writerow(row)
+
+                # Handle the case where we are retrieving both display values and system values:
+                if (self.getOption("display_value")):
+                    if (self.getOption("display_value") == "all"):
+                        # Construct a newly formatted row and populate it
+                        newrow = {}
+                        for k,v in row.items():
+                            newrow[k] = v["value"]
+                            if v["display_value"] is None:
+                                newrow["dv_"+k] = ""
+                            else:
+                                newrow["dv_"+k] = v["display_value"]
+                        self.csvWriter.writerow(newrow)
+                else:
+                    self.csvWriterther.writerow(row)
+
                 self.rowCount = self.rowCount + 1
 
-            
+
             if (firstResponseCount < self.pageSizeInt):
                 self.log.info("No more pages")
             else:
@@ -155,9 +177,10 @@ class SNDataExport:
                         pageIdx=self.pageIdx+1, min=self.pageOffset, max=self.pageOffset+self.pageSizeInt
                         )
                         )
-                    
+
                     pageParams = commonParams.copy()
                     pageParams["sysparm_offset"] = self.pageOffset
+                    # self.log.info("pageIdx: "+str(self.pageIdx)+" , pageOffset: "+str(self.pageOffset)+" , pageSizeInt:"+str(self.pageSizeInt)+" , pageParams: "+str(pageParams))
                     pageResponse = self.makeRequest(self.getOption("table"), pageParams)
                     pageResponseJson = pageResponse.json()
                     pageResponseCount = self.getResultCountFromJson(pageResponseJson)
@@ -170,15 +193,29 @@ class SNDataExport:
                             self.log.info("Row limit reached: {0}".format(self.rowLimit))
                             break
 
-                        self.csvWriter.writerow(row)
+                        # Handle the case where we are retrieving both display values and system values:
+                        if (self.getOption("display_value")):
+                            if (self.getOption("display_value") == "all"):
+                                # Construct a newly formatted row and populate it
+                                newrow = {}
+                                for k,v in row.items():
+                                    newrow[k] = v["value"]
+                                    if v["display_value"] is None:
+                                        newrow["dv_"+k] = ""
+                                    else:
+                                        newrow["dv_"+k] = v["display_value"]
+                                self.csvWriter.writerow(newrow)
+                        else:
+                            self.csvWriter.writerow(row)
+
                         self.rowCount = self.rowCount + 1
-                        
+
                     if (pageResponseCount < self.pageSizeInt):
                         self.log.info("No more pages")
                         return
 
         except Exception as ex:
-            self.log.error("Unhandled exception occurred! {0}".format(ex.__class__.__name__)) 
+            self.log.error("Unhandled exception occurred! {0}".format(ex.__class__.__name__))
             raise ex
         finally:
             self.closeOutputFile()
@@ -195,6 +232,7 @@ class SNDataExport:
         r = []
         for attribute, value in json.items():
             r.append(attribute)
+            r.append("dv_" + attribute)
 
         self.log.debug("Headers: "+(", ".join(r)))
         return r
@@ -231,7 +269,7 @@ parser.add_argument("-p", "--pagesize", dest="pageSize", type=int, default=SNDat
 parser.add_argument("-t", "--table", type=str, required=True, help="The ServiceNow table name to export from. E.g. 'incident'")
 parser.add_argument("-n", "--instance-name", dest="instanceName", type=str, help="The name of the ServiceNow instance. E.g. 'dev71826'")
 parser.add_argument("-N", "--instance-url", dest="instanceUrl", type=str, help="The hostname URL of the ServiceNow instance, if the instance has a custom URL. E.g. 'dev71826.custom-url.co.uk")
-parser.add_argument("-d", "--display-value", action="store_true", help="Fetch displayvalues, instead of system values")
+parser.add_argument("-d", "--display-value", choices=["true", "false", "all"], help="Fetch displayvalues. true=only display values, false=only id values, all=both")
 parser.add_argument("-o", "--output", dest="outputName", type=str, required=True, help="Name of the file to save the data to.")
 parser.add_argument("-a", "--auth-mode", dest="authType", choices=["none", "basic"], default="none", help="Type of authentication. Default: none")
 parser.add_argument("-q", "--query", type=str, default="ORDERBYsys_id", help="Query to use on the table when fetching data.")
